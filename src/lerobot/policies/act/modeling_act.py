@@ -35,7 +35,7 @@ from torchvision.ops.misc import FrozenBatchNorm2d
 
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import ACTION, ACTION_PRED, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
 
 class ACTPolicy(PreTrainedPolicy):
@@ -130,7 +130,19 @@ class ACTPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
-        actions = self.model(batch)[0]
+        # Iterative refinement loop
+        batch_size = batch[OBS_IMAGES][0].shape[0] if OBS_IMAGES in batch else batch[OBS_STATE].shape[0]
+        batch[ACTION_PRED] = torch.zeros(
+            batch_size,
+            self.config.chunk_size,
+            self.config.action_feature.shape[0],
+            device=batch[OBS_STATE].device,
+            dtype=batch[OBS_STATE].dtype,
+        )
+        for _ in range(self.config.loop_steps):
+            actions, _ = self.model(batch)
+            batch[ACTION_PRED] = actions
+
         return actions
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
@@ -139,6 +151,23 @@ class ACTPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
+        # Iterative refinement loop
+        with torch.no_grad():
+            # Initialize action predictions with zeros
+            batch_size = batch[OBS_IMAGES][0].shape[0] if OBS_IMAGES in batch else batch[OBS_STATE].shape[0]
+            batch[ACTION_PRED] = torch.zeros(
+                batch_size,
+                self.config.chunk_size,
+                self.config.action_feature.shape[0],
+                device=batch[OBS_STATE].device,
+                dtype=batch[OBS_STATE].dtype,
+            )
+            # Run refinement iterations
+            for _ in range(self.config.loop_steps):
+                actions_hat, _ = self.model(batch)
+                batch[ACTION_PRED] = actions_hat
+
+        # Final forward pass with gradients for training
         actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
         l1_loss = (
@@ -364,6 +393,9 @@ class ACT(nn.Module):
         # Learnable positional embedding for the transformer's decoder (in the style of DETR object queries).
         self.decoder_pos_embed = nn.Embedding(config.chunk_size, config.dim_model)
 
+        # Projection for previous action predictions (used for iterative refinement)
+        self.decoder_action_input_proj = nn.Linear(self.config.action_feature.shape[0], config.dim_model)
+
         # Final action regression head on the output of the transformer's decoder.
         self.action_head = nn.Linear(config.dim_model, self.config.action_feature.shape[0])
 
@@ -489,12 +521,19 @@ class ACT(nn.Module):
 
         # Forward pass through the transformer modules.
         encoder_out = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
-        # TODO(rcadene, alexander-soare): remove call to `device` ; precompute and use buffer
-        decoder_in = torch.zeros(
-            (self.config.chunk_size, batch_size, self.config.dim_model),
-            dtype=encoder_in_pos_embed.dtype,
-            device=encoder_in_pos_embed.device,
-        )
+
+        # Use previous action predictions as decoder input for iterative refinement
+        if ACTION_PRED in batch:
+            # batch[ACTION_PRED] has shape (B, chunk_size, action_dim)
+            # Project to (B, chunk_size, dim_model) then transpose to (chunk_size, B, dim_model)
+            decoder_in = self.decoder_action_input_proj(batch[ACTION_PRED]).transpose(0, 1)
+        else:
+            # Initialize with zeros if no previous predictions
+            decoder_in = torch.zeros(
+                (self.config.chunk_size, batch_size, self.config.dim_model),
+                dtype=encoder_in_pos_embed.dtype,
+                device=encoder_in_pos_embed.device,
+            )
         decoder_out = self.decoder(
             decoder_in,
             encoder_out,
