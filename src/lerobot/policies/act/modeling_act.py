@@ -131,15 +131,29 @@ class ACTPolicy(PreTrainedPolicy):
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
         # Iterative refinement loop
-        batch_size = batch[OBS_IMAGES][0].shape[0] if OBS_IMAGES in batch else batch[OBS_STATE].shape[0]
+        if OBS_IMAGES in batch:
+            batch_size = batch[OBS_IMAGES][0].shape[0]
+            device = batch[OBS_IMAGES][0].device
+            dtype = batch[OBS_IMAGES][0].dtype
+        elif OBS_STATE in batch:
+            batch_size = batch[OBS_STATE].shape[0]
+            device = batch[OBS_STATE].device
+            dtype = batch[OBS_STATE].dtype
+        else:
+            batch_size = batch[OBS_ENV_STATE].shape[0]
+            device = batch[OBS_ENV_STATE].device
+            dtype = batch[OBS_ENV_STATE].dtype
+
         batch[ACTION_PRED] = torch.zeros(
             batch_size,
             self.config.chunk_size,
             self.config.action_feature.shape[0],
-            device=batch[OBS_STATE].device,
-            dtype=batch[OBS_STATE].dtype,
+            device=device,
+            dtype=dtype,
         )
-        for _ in range(self.config.loop_steps):
+        # Run at least 1 iteration
+        n_iterations = max(1, self.config.loop_steps)
+        for _ in range(n_iterations):
             actions, _ = self.model(batch)
             batch[ACTION_PRED] = actions
 
@@ -154,16 +168,29 @@ class ACTPolicy(PreTrainedPolicy):
         # Iterative refinement loop
         with torch.no_grad():
             # Initialize action predictions with zeros
-            batch_size = batch[OBS_IMAGES][0].shape[0] if OBS_IMAGES in batch else batch[OBS_STATE].shape[0]
+            if OBS_IMAGES in batch:
+                batch_size = batch[OBS_IMAGES][0].shape[0]
+                device = batch[OBS_IMAGES][0].device
+                dtype = batch[OBS_IMAGES][0].dtype
+            elif OBS_STATE in batch:
+                batch_size = batch[OBS_STATE].shape[0]
+                device = batch[OBS_STATE].device
+                dtype = batch[OBS_STATE].dtype
+            else:
+                batch_size = batch[OBS_ENV_STATE].shape[0]
+                device = batch[OBS_ENV_STATE].device
+                dtype = batch[OBS_ENV_STATE].dtype
+
             batch[ACTION_PRED] = torch.zeros(
                 batch_size,
                 self.config.chunk_size,
                 self.config.action_feature.shape[0],
-                device=batch[OBS_STATE].device,
-                dtype=batch[OBS_STATE].dtype,
+                device=device,
+                dtype=dtype,
             )
-            # Run refinement iterations
-            for _ in range(self.config.loop_steps):
+            # Run at least 1 refinement iteration
+            n_iterations = max(1, self.config.loop_steps)
+            for _ in range(n_iterations):
                 actions_hat, _ = self.model(batch)
                 batch[ACTION_PRED] = actions_hat
 
