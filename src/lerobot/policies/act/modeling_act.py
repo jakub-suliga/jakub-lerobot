@@ -488,7 +488,6 @@ class ACT(nn.Module):
         encoder_in_pos_embed = torch.stack(encoder_in_pos_embed, axis=0)
 
         # Forward pass through the transformer modules.
-        encoder_out = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
         # TODO(rcadene, alexander-soare): remove call to `device` ; precompute and use buffer
         decoder_in = torch.zeros(
             (self.config.chunk_size, batch_size, self.config.dim_model),
@@ -496,10 +495,6 @@ class ACT(nn.Module):
             device=encoder_in_pos_embed.device,
         )
 
-        # TRM-style recursive decoder: feed decoder output back as input for multiple rounds.
-        # During training: first n_decoder_recurrence_no_grad steps without gradients, remaining with gradients.
-        # During inference: all steps run (no_grad is handled externally by @torch.no_grad).
-        # (Inspired by "Less is More: Recursive Reasoning with Tiny Networks", arXiv:2510.04871)
         decoder_pos_embed = self.decoder_pos_embed.weight.unsqueeze(1)
         n_recurrence = self.config.n_decoder_recurrence
         n_no_grad = self.config.n_decoder_recurrence_no_grad if self.training else 0
@@ -507,20 +502,36 @@ class ACT(nn.Module):
 
         if n_no_grad > 0:
             with torch.no_grad():
-                for _ in range(n_no_grad):
+                for i in range(n_no_grad):
+                    # After the first round, feed decoder output back into encoder as extra tokens
+                    if i == 0:
+                        enc_tokens = encoder_in_tokens
+                        enc_pos = encoder_in_pos_embed
+                    else:
+                        enc_tokens = torch.cat([encoder_in_tokens, decoder_in], dim=0)
+                        enc_pos = torch.cat([encoder_in_pos_embed, decoder_pos_embed], dim=0)
+                    encoder_out = self.encoder(enc_tokens, pos_embed=enc_pos)
                     decoder_in = self.decoder(
                         decoder_in,
                         encoder_out,
-                        encoder_pos_embed=encoder_in_pos_embed,
+                        encoder_pos_embed=enc_pos,
                         decoder_pos_embed=decoder_pos_embed,
                     )
             decoder_in = decoder_in.detach()
 
-        for _ in range(n_grad):
+        for i in range(n_grad):
+            round_idx = n_no_grad + i
+            if round_idx == 0:
+                enc_tokens = encoder_in_tokens
+                enc_pos = encoder_in_pos_embed
+            else:
+                enc_tokens = torch.cat([encoder_in_tokens, decoder_in], dim=0)
+                enc_pos = torch.cat([encoder_in_pos_embed, decoder_pos_embed], dim=0)
+            encoder_out = self.encoder(enc_tokens, pos_embed=enc_pos)
             decoder_in = self.decoder(
                 decoder_in,
                 encoder_out,
-                encoder_pos_embed=encoder_in_pos_embed,
+                encoder_pos_embed=enc_pos,
                 decoder_pos_embed=decoder_pos_embed,
             )
         decoder_out = decoder_in
