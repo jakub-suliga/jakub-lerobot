@@ -119,6 +119,14 @@ class ACTConfig(PreTrainedConfig):
     # that means only the first layer is used. Here we match the original implementation by setting this to 1.
     # See this issue https://github.com/tonyzhaozh/act/issues/25#issue-2258740521.
     n_decoder_layers: int = 1
+    # TRM-style recursive decoder (inspired by "Less is More: Recursive Reasoning with Tiny Networks",
+    # arXiv:2510.04871). Instead of a single decoder pass, the decoder output is fed back as input for
+    # multiple rounds, allowing iterative refinement of the action prediction.
+    # n_decoder_recurrence: Total number of recursive decoder passes (1 = no recursion, backward compatible).
+    # n_decoder_recurrence_no_grad: During training, how many of the first passes run without gradients
+    #   (the last pass always has gradients). At inference, all passes run (no_grad is handled externally).
+    n_decoder_recurrence: int = 6
+    n_decoder_recurrence_no_grad: int = 5
     # VAE.
     use_vae: bool = True
     latent_dim: int = 32
@@ -158,6 +166,18 @@ class ACTConfig(PreTrainedConfig):
         if self.n_obs_steps != 1:
             raise ValueError(
                 f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
+            )
+        if self.n_decoder_recurrence < 1:
+            raise ValueError(f"`n_decoder_recurrence` must be >= 1. Got {self.n_decoder_recurrence}.")
+        if self.n_decoder_recurrence_no_grad < 0:
+            raise ValueError(
+                f"`n_decoder_recurrence_no_grad` must be >= 0. Got {self.n_decoder_recurrence_no_grad}."
+            )
+        if self.n_decoder_recurrence_no_grad >= self.n_decoder_recurrence:
+            raise ValueError(
+                f"`n_decoder_recurrence_no_grad` ({self.n_decoder_recurrence_no_grad}) must be less than "
+                f"`n_decoder_recurrence` ({self.n_decoder_recurrence}), so that at least one pass "
+                f"has gradients during training."
             )
 
     def get_optimizer_preset(self) -> AdamWConfig:

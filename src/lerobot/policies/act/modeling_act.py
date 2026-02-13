@@ -495,12 +495,35 @@ class ACT(nn.Module):
             dtype=encoder_in_pos_embed.dtype,
             device=encoder_in_pos_embed.device,
         )
-        decoder_out = self.decoder(
-            decoder_in,
-            encoder_out,
-            encoder_pos_embed=encoder_in_pos_embed,
-            decoder_pos_embed=self.decoder_pos_embed.weight.unsqueeze(1),
-        )
+
+        # TRM-style recursive decoder: feed decoder output back as input for multiple rounds.
+        # During training: first n_decoder_recurrence_no_grad steps without gradients, remaining with gradients.
+        # During inference: all steps run (no_grad is handled externally by @torch.no_grad).
+        # (Inspired by "Less is More: Recursive Reasoning with Tiny Networks", arXiv:2510.04871)
+        decoder_pos_embed = self.decoder_pos_embed.weight.unsqueeze(1)
+        n_recurrence = self.config.n_decoder_recurrence
+        n_no_grad = self.config.n_decoder_recurrence_no_grad if self.training else 0
+        n_grad = n_recurrence - n_no_grad
+
+        if n_no_grad > 0:
+            with torch.no_grad():
+                for _ in range(n_no_grad):
+                    decoder_in = self.decoder(
+                        decoder_in,
+                        encoder_out,
+                        encoder_pos_embed=encoder_in_pos_embed,
+                        decoder_pos_embed=decoder_pos_embed,
+                    )
+            decoder_in = decoder_in.detach()
+
+        for _ in range(n_grad):
+            decoder_in = self.decoder(
+                decoder_in,
+                encoder_out,
+                encoder_pos_embed=encoder_in_pos_embed,
+                decoder_pos_embed=decoder_pos_embed,
+            )
+        decoder_out = decoder_in
 
         # Move back to (B, S, C).
         decoder_out = decoder_out.transpose(0, 1)
